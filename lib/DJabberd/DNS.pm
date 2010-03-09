@@ -209,10 +209,12 @@ sub event_read_srv {
     my $cb = $self->{callback};
     my @ans = $self->read_packets;
 
-    # FIXME: is this right?  right order and direction?
+    # FIXME: Should nominally do weighted random choice beteen records
+    # with lowest priority, not just choose the highest weighted.  See
+    # RFC 2782.
     my @targets = sort {
         $a->priority <=> $b->priority ||
-        $a->weight   <=> $b->weight
+        $b->weight   <=> $a->weight
     } grep { ref $_ eq "Net::DNS::RR::SRV" && $_->port } @ans;
 
     $self->close;
