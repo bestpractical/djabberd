@@ -46,10 +46,21 @@ sub srv {
         }
     }
 
+    my $try_a = sub {
+        my @values = @_;
+        return $callback->(@values) if @values;
+        $logger->debug("DNS socket for 'srv' had nothing, falling back to 'a' lookup");
+        DJabberd::DNS->new(
+            hostname => $hostname,
+            port     => $port,
+            callback => $callback,
+        );
+    };
+
     $class->resolve(
         type     => 'SRV',
         domain   => "$service.$hostname",
-        callback => $callback,
+        callback => $try_a,
         port     => $port,
     );
 }
@@ -204,15 +215,9 @@ sub event_read_srv {
         $a->weight   <=> $b->weight
     } grep { ref $_ eq "Net::DNS::RR::SRV" && $_->port } @ans;
 
-    unless (@targets) {
-        # no result, fallback to an A lookup
-        $self->close;
-        $logger->debug("DNS socket for 'srv' had nothing, falling back to 'a' lookup");
-        DJabberd::DNS->new(hostname => $self->{hostname},
-                           port     => $self->{port},
-                           callback => $cb);
-        return;
-    }
+    $self->close;
+
+    return $cb->() unless @targets;
 
     # FIXME:  we only do the first target now.  should do a chain.
     $logger->debug("DNS socket for 'srv' found stuff, now doing hostname lookup on " . $targets[0]->target);
