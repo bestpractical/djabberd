@@ -57,10 +57,32 @@ sub srv {
         );
     };
 
+    my $gafyd = sub {
+        my @values = @_;
+        return $callback->(@values) if @values;
+        DJabberd::DNS->resolve(
+            type     => "MX",
+            domain   => $hostname,
+            port     => $port,
+            callback => sub {
+                # If we get nothing, fall back to the A lookup
+                return $try_a->() unless grep {$_->name eq "aspmx.l.google.com"} @_;
+                # Otherwise, reprise on gmail.com
+                $logger->debug("Has a GAFYD MX, trying gtalk's server");
+                return DJabberd::DNS->srv(
+                    domain   => "gmail.com",
+                    service  => $service,
+                    port     => $port,
+                    callback => $callback,
+                );
+            }
+        );
+    };
+
     $class->resolve(
         type     => 'SRV',
         domain   => "$service.$hostname",
-        callback => $try_a,
+        callback => $DJabberd::GAFYD ? $gafyd : $try_a,
         port     => $port,
     );
 }
@@ -226,7 +248,27 @@ sub event_read_srv {
     DJabberd::DNS->new(hostname => $targets[0]->target,
                        port     => $targets[0]->port,
                        callback => $cb);
+}
+
+sub event_read_mx {
+    my $self = shift;
+
+    my $cb = $self->{callback};
+    my @ans = $self->read_packets;
+
+    my @targets = sort {
+        $a->preference <=> $b->preference
+    } grep { ref $_ eq "Net::DNS::RR::MX" } @ans;
+
     $self->close;
+
+    return $cb->() unless @targets;
+
+    # FIXME:  we only do the first target now.  should do a chain.
+    $logger->debug("DNS socket for 'MX' found stuff, now doing hostname lookup on " . $targets[0]->exchange);
+    DJabberd::DNS->new(hostname => $targets[0]->exchange,
+                       port     => $self->{port},
+                       callback => $cb);
 }
 
 package DJabberd::IPEndPoint;

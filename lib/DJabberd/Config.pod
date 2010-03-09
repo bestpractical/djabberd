@@ -143,6 +143,17 @@ description; this is used for client service auto-discovery.
 If set, requires that clients have negotiated a TLS before
 authentication information is sent.
 
+=head2 IntuitGAFYD C<boolean>
+
+Interoperability with Google Apps For Your Domain can cause headaches;
+if the administrator fails to add the requisite SRV records,
+federation with other domains will obviously fail.  However, they will
+be able to chat with other Google Talk users, so jabber will appear to
+"work" from their point of view.  Turning this boolean on (it defaults
+to off) will detect misconfigured GAFYD domains (detected by examining
+their MX record) and return whatever C<gmail.com> would return for
+that SRV lookup.
+
 
 
 =head1 PLUGIN CONFIGURATION
