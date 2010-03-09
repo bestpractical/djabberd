@@ -186,7 +186,7 @@ sub event_read_a {
                 $logger->debug("Ignoring RR response for $self->{hostname}");
             }
             else {
-                $cb->(DJabberd::IPEndPoint->new($ans->address, $self->{port}));
+                $cb->(DJabberd::IPEndPoint->new($ans->address, $self->{port}, $self->{hostname}));
             }
             $self->close;
             1;
@@ -229,10 +229,15 @@ sub event_read_srv {
 
 package DJabberd::IPEndPoint;
 sub new {
-    my ($class, $addr, $port) = @_;
-    return bless { addr => $addr, port => $port };
+    my ($class, $addr, $port, $name) = @_;
+    if (defined $name) {
+        $name = lc $name;
+        $name =~ s/\.$//;
+    }
+    return bless { addr => $addr, port => $port, name => $name };
 }
 
+sub name { $_[0]{name} }
 sub addr { $_[0]{addr} }
 sub port { $_[0]{port} }
 
