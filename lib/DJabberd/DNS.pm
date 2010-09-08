@@ -6,6 +6,7 @@ use fields (
             'callback',
             'srv',
             'port',
+            'type',
             'recurse_count',
             'became_readable',  # bool
             'timed_out',        # bool
@@ -45,32 +46,45 @@ sub srv {
         }
     }
 
-    my $pkt = Net::DNS::Packet->new("$service.$hostname", "SRV", "IN");
+    my $try_a = sub {
+        my @values = @_;
+        return $callback->(@values) if @values;
+        $logger->debug("DNS socket for 'srv' had nothing, falling back to 'a' lookup");
+        DJabberd::DNS->new(
+            hostname => $hostname,
+            port     => $port,
+            callback => $callback,
+        );
+    };
 
-    $logger->debug("pkt = $pkt");
-    my $sock = $resolver->bgsend($pkt);
-    $logger->debug("sock = $sock");
-    my $self = $class->SUPER::new($sock);
+    my $gafyd = sub {
+        my @values = @_;
+        return $callback->(@values) if @values;
+        DJabberd::DNS->resolve(
+            type     => "MX",
+            domain   => $hostname,
+            port     => $port,
+            callback => sub {
+                # If we get nothing, fall back to the A lookup
+                return $try_a->() unless grep {$_->name eq "aspmx.l.google.com"} @_;
+                # Otherwise, reprise on gmail.com
+                $logger->debug("Has a GAFYD MX, trying gtalk's server");
+                return DJabberd::DNS->srv(
+                    domain   => "gmail.com",
+                    service  => $service,
+                    port     => $port,
+                    callback => $callback,
+                );
+            }
+        );
+    };
 
-    $self->{hostname} = $hostname;
-    $self->{callback} = $callback;
-    $self->{srv}      = $service;
-    $self->{port}     = $port;
-    $self->{recurse_count} = $recurse_count;
-
-    $self->{became_readable} = 0;
-    $self->{timed_out}       = 0;
-
-    # TODO: make DNS timeout configurable
-    Danga::Socket->AddTimer(5.0, sub {
-        return if $self->{became_readable};
-        $self->{timed_out} = 1;
-        $logger->debug("DNS 'SRV' lookup for '$hostname' timed out");
-        $callback->();
-        $self->close;
-    });
-
-    $self->watch_read(1);
+    $class->resolve(
+        type     => 'SRV',
+        domain   => "$service.$hostname",
+        callback => $DJabberd::GAFYD ? $gafyd : $try_a,
+        port     => $port,
+    );
 }
 
 sub new {
@@ -93,23 +107,52 @@ sub new {
         return;
     }
 
+    $class->resolve(
+        type     => 'A',
+        domain   => $hostname,
+        callback => $callback,
+        port     => $port,
+    );
+}
 
-    my $sock = $resolver->bgsend($hostname);
+sub resolve {
+    my ($class, %opts) = @_;
+
+    foreach (qw(callback domain type port)) {
+        croak("No '$_' field") unless $opts{$_};
+    }
+
+    my $hostname = delete $opts{'domain'};
+    my $callback = delete $opts{'callback'};
+    my $type     = delete $opts{'type'};
+    my $port     = delete $opts{'port'};
+    my $recurse_count = delete($opts{'recurse_count'}) || 0;
+    croak "unknown opts" if %opts;
+
+    my $method = "event_read_" . lc $type;
+    croak "unknown type $type" unless $class->can($method);
+
+    my $pkt = Net::DNS::Packet->new($hostname, $type, "IN");
+
+    $logger->debug("pkt = $pkt");
+    my $sock = $resolver->bgsend($pkt);
+    $logger->debug("sock = $sock");
     my $self = $class->SUPER::new($sock);
 
     $self->{hostname} = $hostname;
     $self->{callback} = $callback;
     $self->{port}     = $port;
+    $self->{type}     = $type;
     $self->{recurse_count} = $recurse_count;
 
     $self->{became_readable} = 0;
     $self->{timed_out}       = 0;
 
-    # TODO: make DNS timeout configurable, remove duplicate code
+    # TODO: make DNS timeout configurable
     Danga::Socket->AddTimer(5.0, sub {
         return if $self->{became_readable};
         $self->{timed_out} = 1;
-        $logger->debug("DNS 'A' lookup for '$hostname' timed out");
+        $logger->debug("DNS '$type' lookup for '$hostname' timed out");
         $callback->();
         $self->close;
     });
@@ -128,24 +171,22 @@ sub event_read {
     }
     $self->{became_readable} = 1;
 
-    if ($self->{srv}) {
-        $logger->debug("DNS socket $self->{sock} became readable for 'srv'");
-        return $self->event_read_srv;
-    } else {
-        $logger->debug("DNS socket $self->{sock} became readable for 'a'");
-        return $self->event_read_a;
-    }
+    $logger->debug("DNS socket $self->{sock} became readable for '$self->{type}'");
+
+    my $method = "event_read_" . lc $self->{type};
+    return $self->$method;
+}
+
+sub read_packets {
+    my $self = shift;
+    return $resolver->bgread($self->{sock})->answer;
 }
 
 sub event_read_a {
     my $self = shift;
 
-    my $sock = $self->{sock};
-    my $cb   = $self->{callback};
-
-    my $packet = $resolver->bgread($sock);
-
-    my @ans = $packet->answer;
+    my $cb = $self->{callback};
+    my @ans = $self->read_packets;
 
     for my $ans (@ans) {
         my $rv = eval {
@@ -167,7 +208,7 @@ sub event_read_a {
                 $logger->debug("Ignoring RR response for $self->{hostname}");
             }
             else {
-                $cb->(DJabberd::IPEndPoint->new($ans->address, $self->{port}));
+                $cb->(DJabberd::IPEndPoint->new($ans->address, $self->{port}, $self->{hostname}));
             }
             $self->close;
             1;
@@ -187,42 +228,60 @@ sub event_read_a {
 sub event_read_srv {
     my $self = shift;
 
-    my $sock = $self->{sock};
-    my $cb   = $self->{callback};
+    my $cb = $self->{callback};
+    my @ans = $self->read_packets;
 
-    my $packet = $resolver->bgread($sock);
-    my @ans = $packet->answer;
-
-    # FIXME: is this right?  right order and direction?
+    # FIXME: Should nominally do weighted random choice beteen records
+    # with lowest priority, not just choose the highest weighted.  See
+    # RFC 2782.
     my @targets = sort {
         $a->priority <=> $b->priority ||
-        $a->weight   <=> $b->weight
+        $b->weight   <=> $a->weight
     } grep { ref $_ eq "Net::DNS::RR::SRV" && $_->port } @ans;
 
-    unless (@targets) {
-        # no result, fallback to an A lookup
-        $self->close;
-        $logger->debug("DNS socket $sock for 'srv' had nothing, falling back to 'a' lookup");
-        DJabberd::DNS->new(hostname => $self->{hostname},
-                           port     => $self->{port},
-                           callback => $cb);
-        return;
-    }
+    $self->close;
+
+    return $cb->() unless @targets;
 
     # FIXME:  we only do the first target now.  should do a chain.
-    $logger->debug("DNS socket $sock for 'srv' found stuff, now doing hostname lookup on " . $targets[0]->target);
+    $logger->debug("DNS socket for 'srv' found stuff, now doing hostname lookup on " . $targets[0]->target);
     DJabberd::DNS->new(hostname => $targets[0]->target,
                        port     => $targets[0]->port,
                        callback => $cb);
+}
+
+sub event_read_mx {
+    my $self = shift;
+
+    my $cb = $self->{callback};
+    my @ans = $self->read_packets;
+
+    my @targets = sort {
+        $a->preference <=> $b->preference
+    } grep { ref $_ eq "Net::DNS::RR::MX" } @ans;
+
     $self->close;
+
+    return $cb->() unless @targets;
+
+    # FIXME:  we only do the first target now.  should do a chain.
+    $logger->debug("DNS socket for 'MX' found stuff, now doing hostname lookup on " . $targets[0]->exchange);
+    DJabberd::DNS->new(hostname => $targets[0]->exchange,
+                       port     => $self->{port},
+                       callback => $cb);
 }
 
 package DJabberd::IPEndPoint;
 sub new {
-    my ($class, $addr, $port) = @_;
-    return bless { addr => $addr, port => $port };
+    my ($class, $addr, $port, $name) = @_;
+    if (defined $name) {
+        $name = lc $name;
+        $name =~ s/\.$//;
+    }
+    return bless { addr => $addr, port => $port, name => $name };
 }
 
+sub name { $_[0]{name} }
 sub addr { $_[0]{addr} }
 sub port { $_[0]{port} }
 

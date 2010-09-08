@@ -121,6 +121,11 @@ sub set_config_sslcertificatefile {
 sub ssl_private_key_file { return $_[0]{ssl_private_key_file} }
 sub ssl_cert_file        { return $_[0]{ssl_cert_file}        }
 
+sub set_config_intuitgafyd {
+    my ($self, $val) = @_;
+    $DJabberd::GAFYD = as_bool($val);
+}
+
 sub set_config_oldssl {
     my ($self, $val) = @_;
     $self->{old_ssl} = as_bool($val);
