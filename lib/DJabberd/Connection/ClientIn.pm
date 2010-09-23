@@ -229,7 +229,7 @@ sub on_stanza_received {
                                       },
                                   }
                                   ) unless $class;
-    return $self->stream_error("unsupported-stanza-type") unless $class;
+    return $self->stream_error("unsupported-stanza-type", scalar $node->element) unless $class;
 
     $DJabberd::Stats::counter{"ClientIn:$class"}++;
 
